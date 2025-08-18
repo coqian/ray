@@ -7,6 +7,10 @@ from ray.data._internal.issue_detection.issue_detector import (
     IssueDetector,
     IssueType,
 )
+from ray.data._internal.operator_event_exporter import (
+    OperatorEvent,
+    get_operator_event_exporter,
+)
 
 if TYPE_CHECKING:
     from ray.data._internal.execution.interfaces.physical_operator import (
@@ -27,6 +31,7 @@ class IssueDetectorManager:
             detector: time.perf_counter() for detector in self._issue_detectors
         }
         self.executor = executor
+        self._operator_event_exporter = get_operator_event_exporter()
 
     def invoke_detectors(self) -> None:
         curr_time = time.perf_counter()
@@ -47,8 +52,10 @@ class IssueDetectorManager:
 
     def _report_issues(self, issues: List[Issue]) -> None:
         operators: Dict[str, "PhysicalOperator"] = {}
-        for operator in self.executor._topology.keys():
+        op_to_id: Dict["PhysicalOperator", str] = {}
+        for i, operator in enumerate(self.executor._topology.keys()):
             operators[operator.id] = operator
+            op_to_id[operator] = self.executor._get_operator_id(operator, i)
             # Reset issue detector metrics for each operator so that previous issues
             # don't affect the current ones.
             operator.metrics._issue_detector_hanging = 0
@@ -59,6 +66,19 @@ class IssueDetectorManager:
             operator = operators.get(issue.operator_id)
             if not operator:
                 continue
+
+            if self._operator_event_exporter is not None:
+                event_time = time.time()
+                operator_event = OperatorEvent(
+                    dataset_id=issue.dataset_name,
+                    operator_id=op_to_id[operator],
+                    operator_name=operator.name,
+                    event_time=event_time,
+                    event_type=issue.issue_type,
+                    message=issue.message,
+                )
+                self._operator_event_exporter.export_operator_event(operator_event)
+
             if issue.issue_type == IssueType.HANGING:
                 operator.metrics._issue_detector_hanging += 1
             if issue.issue_type == IssueType.HIGH_MEMORY:
